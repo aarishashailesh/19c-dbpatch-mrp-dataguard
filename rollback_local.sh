@@ -3,7 +3,7 @@
 # rollback_local.sh : roll the MRPs back on THIS node. Never part of a normal run.
 #
 # USAGE:
-#   ./rollback_local.sh --yes [--dry-run] [--detach]
+#   ./rollback_local.sh --yes [--dry-run] [--foreground]
 #
 # Order (README section 4 of both patches, standby side first):
 #   1 roll back the node whose database is a STANDBY  (apply off, stop, rollback, start, apply on)

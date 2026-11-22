@@ -3,7 +3,7 @@
 # 01_prep_local.sh : MRP preparation on THIS node (ONLINE). Run on BOTH nodes.
 #
 # USAGE:
-#   ./01_prep_local.sh [--dry-run] [--from-step N] [--detach]
+#   ./01_prep_local.sh [--dry-run] [--from-step N] [--foreground]
 #
 # Steps 1 to 8 are the single-node preparation (zips, space, extract, OPatch, RU level,
 # conflicts, snapshots, backups). Step 9 checks the Data Guard configuration.

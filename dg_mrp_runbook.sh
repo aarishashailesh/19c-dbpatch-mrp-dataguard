@@ -21,8 +21,10 @@ if [[ "${1:-}" == "--status" ]]; then
 fi
 cat <<TXT
 MRP ${MRP_LABEL}: standby-first, in place, two nodes (${P} = primary, ${S} = standby at the start)
-All scripts run as root from ${D}. Add --dry-run to any of them first. --detach (systemd-run) is
-available where no password is needed; remove the unit afterwards: systemctl stop mrp-<script>.
+All scripts run as root from ${D}. Add --dry-run to any of them first.
+Long steps (01, 02, 04, 08, rollback) auto-detach under systemd-run (AUTO_DETACH=yes), so an SSH logout cannot
+kill them; --foreground opts out. 03 and 05 need the SYS password and run in the foreground.
+Remove each unit when done: systemctl stop mrp-<script>.
 
  A. Preparation (online, no outage)
   1. ${P}   ${D}/01_prep_local.sh

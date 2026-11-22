@@ -16,6 +16,10 @@ DRY_RUN="${DRY_RUN:-false}"
 START_STEP="${START_STEP:-1}"
 ASSUME_YES="${ASSUME_YES:-false}"
 DETACH="${DETACH:-false}"
+FOREGROUND="${FOREGROUND:-false}"
+# AUTO_DETACH=yes (patch.conf): long steps re-run themselves under systemd-run, so an SSH logout, TMOUT
+# or logind KillUserProcesses cannot kill opatchauto halfway. --foreground opts out.
+AUTO_DETACH="${AUTO_DETACH:-yes}"
 FAILED=0
 NL=$'\n'
 
@@ -59,6 +63,7 @@ parse_args() {
       --from-step) START_STEP="${2:?--from-step needs a number}"; shift 2 ;;
       --yes)       ASSUME_YES=true; shift ;;
       --detach)    DETACH=true; shift ;;
+      --foreground) FOREGROUND=true; DETACH=false; shift ;;
       -h|--help)   show_help; exit 0 ;;
       *)           die "Unknown argument: $1" ;;
     esac
@@ -66,20 +71,41 @@ parse_args() {
   export DRY_RUN START_STEP ASSUME_YES
 }
 
-# detach_self "$@" : with --detach, re-run this script as a transient systemd service and exit.
+# session_limit_warning : a foreground run dies with the login session on hardened hosts
+session_limit_warning() {
+  local why=""
+  [[ -n "${TMOUT:-}" ]] && why="TMOUT=${TMOUT}s is set"
+  if grep -qsiE '^[[:space:]]*KillUserProcesses=yes' /etc/systemd/logind.conf /etc/systemd/logind.conf.d/*.conf 2>/dev/null; then
+    why="${why:+${why}; }logind KillUserProcesses=yes"
+  fi
+  [[ -n "${why}" ]] && warn "Running in the foreground (${why}). If this session is closed the run is killed mid-step."
+  return 0
+}
+
+# detach_self "$@" : re-run this script as a transient systemd service and exit.
+# Default (AUTO_DETACH=yes): detach automatically. --foreground stays attached, --detach forces it.
 # Survives logout, TMOUT and KillUserProcesses on hardened hosts. Not for steps that prompt.
 detach_self() {
-  [[ "${DETACH}" == "true" ]] || return 0
+  local auto=false
+  if [[ "${DETACH}" != "true" ]]; then
+    if is_dry || [[ "${FOREGROUND}" == "true" || "${AUTO_DETACH}" != "yes" || -n "${INVOCATION_ID:-}" ]]; then
+      is_dry || [[ -n "${INVOCATION_ID:-}" ]] || session_limit_warning
+      return 0
+    fi
+    if ! command -v systemd-run >/dev/null; then warn "systemd-run not found: running in the foreground"; session_limit_warning; return 0; fi
+    DETACH=true; auto=true
+  fi
   is_dry && { log "[DRY-RUN] would start $(basename "$0") under systemd-run"; return 0; }
   command -v systemd-run >/dev/null || die "systemd-run not found"
   local unit args=() a
   unit="mrp-$(basename "$0" .sh)"
-  for a in "$@"; do [[ "$a" == "--detach" ]] || args+=("$a"); done
+  for a in "$@"; do [[ "$a" == "--detach" || "$a" == "--foreground" ]] || args+=("$a"); done
   systemctl stop "${unit}" 2>/dev/null || true
   systemctl reset-failed "${unit}" 2>/dev/null || true
   systemd-run --unit="${unit}" --remain-after-exit "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")" "${args[@]}"
+  [[ "${auto}" == "true" ]] && echo "Auto-detached (AUTO_DETACH=yes): the run continues if this SSH session drops. Use --foreground to stay attached."
   echo "Started ${unit}. Watch: tail -f ${LOG_DIR}/$(basename "$0" .sh | sed 's/^[0-9]*_//').log ; systemctl show ${unit} -p ActiveState -p Result -p ExecMainStatus"
-  echo "Remove the unit when done (audited hosts must not keep it): systemctl stop ${unit}"
+  echo "Success = ActiveState=active Result=success ExecMainStatus=0. Remove the unit when done (audited hosts must not keep it): systemctl stop ${unit}"
   exit 0
 }
 
@@ -447,7 +473,7 @@ prep_6() {
   (
     export ORACLE_HOME="${GRID_HOME}" CV_ASSUME_DISTID="${CV_ASSUME_DISTID}"
     export PATH="${GRID_HOME}/OPatch:${PATH}"; unset LD_LIBRARY_PATH
-    cd "${PATCH_LOC}"
+    cd "${PATCH_LOC}" || exit 1
     "${GRID_HOME}/OPatch/opatchauto" apply "${GI_MRP_DIR}" -analyze -oh "${GRID_HOME}"
   ) && pass "no conflicts on Grid home" || die "opatchauto -analyze reported a problem on the Grid home. Read the output above."
   if [[ "${DB_PATCH_METHOD}" == "DB_MRP" ]]; then
@@ -559,15 +585,28 @@ ${DB_HOME}/OPatch/opatchauto apply -binary ${GI_MRP_DIR} -oh ${DB_HOME} -target_
 }
 
 apply_grid_home() {
-  if grid_home_patched; then log "  Grid home already contains the MRP patches, skipping"; return 0; fi
+  if grid_home_patched; then
+    # An interrupted opatchauto session (killed during postpatch) leaves the binaries patched but the
+    # CRS stack down and the postpatch steps undone. Resume that session instead of skipping.
+    if crs_online; then log "  Grid home already contains the MRP patches, skipping"; return 0; fi
+    log "  Grid home is patched but CRS is not online: resuming the interrupted opatchauto session"
+    run_grid_opatchauto resume \
+      || die "opatchauto resume failed. Read the newest log under ${GRID_HOME}/cfgtoollogs/opatchauto. Once the cause is fixed, resume by hand as root: ${GRID_HOME}/OPatch/opatchauto resume"
+    return 0
+  fi
   log "  opatchauto apply ${GI_MRP_PATCH} on ${GRID_HOME} (stops and restarts the CRS stack)"
+  run_grid_opatchauto apply "${GI_MRP_DIR}" -oh "${GRID_HOME}" \
+    || die "opatchauto failed on ${GRID_HOME}. Fix the cause, then as root: ${GRID_HOME}/OPatch/opatchauto resume   (re-running this step also resumes an interrupted session)."
+}
+
+run_grid_opatchauto() {
   (
     export ORACLE_HOME="${GRID_HOME}" CV_ASSUME_DISTID="${CV_ASSUME_DISTID:-OEL7.8}"
     export PATH="${GRID_HOME}/OPatch:${PATH}"
     unset LD_LIBRARY_PATH
-    cd "${PATCH_LOC}"
-    "${GRID_HOME}/OPatch/opatchauto" apply "${GI_MRP_DIR}" -oh "${GRID_HOME}"
-  ) || die "opatchauto failed on ${GRID_HOME}. Fix the cause, then as root: ${GRID_HOME}/OPatch/opatchauto resume   (or re-run phase 2)."
+    cd "${PATCH_LOC}" || exit 1
+    "${GRID_HOME}/OPatch/opatchauto" "$@"
+  )
 }
 
 wait_crs() { wait_until "${CRS_WAIT_SECONDS:-900}" 15 "CRS stack online" crs_online || die "CRS did not come online. Check: crsctl check crs / ${GRID_HOME}/log/$(hostname -s)/alert$(hostname -s).log"; }
@@ -615,7 +654,14 @@ verify_binaries() {
 verify_crs() {
   step "CRS"
   crs_online && pass "crsctl check crs: online" || fail "CRS is not fully online"
-  run_grid "${GRID_HOME}/bin/crsctl query crs releasepatch; ${GRID_HOME}/bin/crsctl query crs softwarepatch" 2>&1 | while IFS= read -r l; do log "  ${l}"; done
+  local pl rel node
+  pl=$(run_grid "${GRID_HOME}/bin/crsctl query crs releasepatch; ${GRID_HOME}/bin/crsctl query crs softwarepatch" 2>&1 || true)
+  echo "${pl}" | while IFS= read -r l; do log "  ${l}"; done
+  rel=$(sed -n 's/.*release patch level is \[\([0-9]*\)\].*/\1/p' <<< "${pl}" | head -1)
+  node=$(sed -n 's/.*patch level on node .* is \[\([0-9]*\)\].*/\1/p' <<< "${pl}" | head -1)
+  if [[ -z "${rel}" || -z "${node}" ]]; then warn "could not read the Clusterware patch levels (crsctl query crs releasepatch / softwarepatch)"
+  elif [[ "${rel}" == "${node}" ]]; then pass "Clusterware node patch level ${node} equals the release patch level"
+  else fail "Clusterware node patch level ${node} differs from the release patch level ${rel}: the opatchauto postpatch step did not finish (interrupted session?). Check ${GRID_HOME}/cfgtoollogs/opatchauto and the crs_postpatch log under the Grid user's crsdata, then as root: ${GRID_HOME}/OPatch/opatchauto resume"; fi
   run_grid "${GRID_HOME}/bin/crsctl status resource -t" 2>&1 | while IFS= read -r l; do log "  ${l}"; done
 }
 
@@ -723,7 +769,7 @@ rollback_grid_home() {
     export ORACLE_HOME="${GRID_HOME}" CV_ASSUME_DISTID="${CV_ASSUME_DISTID:-OEL7.8}"
     export PATH="${GRID_HOME}/OPatch:${PATH}"
     unset LD_LIBRARY_PATH
-    cd "${PATCH_LOC}"
+    cd "${PATCH_LOC}" || exit 1
     "${GRID_HOME}/OPatch/opatchauto" rollback "${GI_MRP_DIR}" -oh "${GRID_HOME}"
   ) || die "opatchauto rollback failed on ${GRID_HOME}"
 }

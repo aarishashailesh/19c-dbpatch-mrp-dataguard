@@ -4,13 +4,14 @@
 # Run it on the standby first, and again on the original primary after the switchover.
 #
 # USAGE:
-#   ./02_apply_standby_node.sh [--dry-run] [--from-step N] [--detach]
+#   ./02_apply_standby_node.sh [--dry-run] [--from-step N] [--foreground]
 #
 # Steps: 1 role and broker checks      4 Grid home: opatchauto apply GI MRP
 #        2 redo apply off, stop        5 wait for CRS, start listener and database
 #        3 DB home: apply MRP          6 redo apply on, wait for the apply lag
 # No datapatch here: SQL changes reach a physical standby through redo from the primary.
-# Needs no password when dgmgrl OS authentication works, so --detach is possible.
+# Runs detached under systemd-run by default (survives SSH logout / TMOUT), so it uses dgmgrl OS
+# authentication and asks for no password. --foreground stays attached and allows a SYS password prompt.
 # =============================================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

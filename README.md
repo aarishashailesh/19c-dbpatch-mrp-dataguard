@@ -31,8 +31,11 @@ MRP 19.33.0.0.261117 applied **in place**, standby first. Companion of `oracle-d
 ## Password and hardened hosts
 
 - The SYS password is only required for the switchover. It is read with `read -s` (or `DG_SYS_PASSWORD`), goes to `dgmgrl` on stdin and is never logged or stored.
-- Apply on/off use `dgmgrl /` OS authentication first, so `02`, `04` and `08` can run with `--detach` (a `systemd-run` unit `mrp-<script>`; `systemctl stop` it afterwards). Run `03` in the foreground.
+- `01`, `02`, `04`, `08` and `rollback_local.sh` auto-detach under `systemd-run` (unit `mrp-<script>`, `AUTO_DETACH="yes"` in `patch.conf`), so a closed SSH session, `TMOUT` or `KillUserProcesses=yes` cannot kill them halfway. Detached runs use `dgmgrl /` OS authentication and cannot prompt for a password. Watch the log named in the output; `systemctl stop` the unit afterwards. `--foreground` stays attached. `03` and `05` need the SYS password and always run in the foreground.
+- If `opatchauto` was interrupted (Grid patched, CRS down), re-run `02 --from-step 4`: it runs `opatchauto resume`.
 - `CHOPT_REAPPLY` is `no` here: an option that comes back TRUE fails `06` with the per-node fix, since chopt needs a restart.
+- Expect this after every MRP: the relink turns `olap` and `rat` back on, so `06` fails once per node. Fix on each node, then re-run `06`: set redo apply off (`dgmgrl / "edit database '<db_unique_name>' set state='apply-off'"`), `srvctl stop database` as grid, `chopt disable olap` and `chopt disable rat` as oracle, `srvctl start database`, set apply on again. Do the standby first.
+- `06` also fails if the Clusterware node patch level differs from the release patch level (`crsctl query crs softwarepatch` against `releasepatch`). That means the `opatchauto` postpatch step did not finish: read the opatchauto and `crs_postpatch` logs, then `opatchauto resume`.
 
 ## Files
 

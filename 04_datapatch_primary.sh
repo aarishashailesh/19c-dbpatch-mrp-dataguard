@@ -4,7 +4,7 @@
 # binaries (after 02 ran on the standby, the switchover, and 02 on the old primary).
 #
 # USAGE:
-#   ./04_datapatch_primary.sh [--dry-run] [--from-step N] [--yes] [--detach]
+#   ./04_datapatch_primary.sh [--dry-run] [--from-step N] [--yes] [--foreground]
 #
 # Steps: 1 checks    2 disable SYS.DB_DDL_ALERT_TRG    3 datapatch -verbose    4 enable the trigger
 # The SQL changes reach the standby through redo; datapatch is never run on a standby.
